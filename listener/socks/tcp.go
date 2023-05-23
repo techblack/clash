@@ -1,8 +1,12 @@
 package socks
 
 import (
+	"crypto/tls"
 	"io"
 	"net"
+	"time"
+
+	"github.com/Dreamacro/clash/log"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
 	N "github.com/Dreamacro/clash/common/net"
@@ -35,7 +39,41 @@ func (l *Listener) Close() error {
 }
 
 func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
-	l, err := net.Listen("tcp", addr)
+	cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
+	if err != nil {
+		log.Debugln("failed to load certificate: %v", err)
+		cert, err = GenX509KeyPair()
+		if err != nil {
+			log.Fatalln("failed to generate certificate: %v", err)
+		}
+	}
+
+	setTCPKeepAlive := func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
+		// Check that the underlying connection really is TCP.
+		if tcpConn, ok := clientHello.Conn.(*net.TCPConn); ok {
+			if err := tcpConn.SetKeepAlive(true); err != nil {
+				log.Debugln("Could not set keep alive", err)
+			} else {
+				log.Debugln("update keep alive")
+			}
+			if err := tcpConn.SetKeepAlivePeriod(5 * time.Minute); err != nil {
+				log.Debugln("Could not set keep alive period", err)
+			} else {
+				log.Debugln("update keep alive period")
+			}
+		} else {
+			log.Debugln("TLS over non-TCP connection")
+		}
+
+		// Make sure to return nil, nil to let the caller fall back on the default behavior.
+		return nil, nil
+	}
+
+	config := &tls.Config{Certificates: []tls.Certificate{cert}, GetConfigForClient: setTCPKeepAlive}
+	l, err := tls.Listen("tcp", addr, config)
+	if err != nil {
+		log.Fatalln("failed to listen: %v", err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +99,7 @@ func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
 }
 
 func handleSocks(conn net.Conn, in chan<- C.ConnContext) {
-	conn.(*net.TCPConn).SetKeepAlive(true)
+	conn.(*tls.Conn).SetReadDeadline(time.Now().Add(10 * time.Second))
 	bufConn := N.NewBufferedConn(conn)
 	head, err := bufConn.Peek(1)
 	if err != nil {
